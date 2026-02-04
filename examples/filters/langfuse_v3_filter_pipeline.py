@@ -327,6 +327,19 @@ class Pipeline:
                     }
                     self.log(f"Usage data extracted: {usage}")
 
+        if not usage and "usage" in body:
+            info = body["usage"]
+            if isinstance(info, dict):
+                input_tokens = info.get("prompt_tokens") or info.get("prompt_eval_count")
+                output_tokens = info.get("completion_tokens") or info.get("eval_count")
+                if input_tokens is not None and output_tokens is not None:
+                    usage = {
+                        "input": input_tokens,
+                        "output": output_tokens,
+                        "unit": "TOKENS",
+                    }
+                    self.log(f"Usage data extracted from body: {usage}")
+
         # Update the trace with complete output information
         trace = self.chat_traces[chat_id]
         
