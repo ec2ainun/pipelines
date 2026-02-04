@@ -14,7 +14,7 @@ import uuid
 import json
 
 
-from utils.pipelines.main import get_last_assistant_message
+from utils.pipelines.main import get_last_assistant_message, get_last_user_message
 from pydantic import BaseModel
 from langfuse import Langfuse
 
@@ -160,7 +160,7 @@ class Pipeline:
             self.log("[WARNING] Langfuse client not initialized - Skipped")
             return body
 
-        self.log(f"Inlet function called with body: {body} and user: {user}")
+        # self.log(f"Inlet function called with body: {body} and user: {user}")
 
         metadata = body.get("metadata", {})
         chat_id = metadata.get("chat_id", str(uuid.uuid4()))
@@ -222,6 +222,7 @@ class Pipeline:
 
                 # Set additional trace attributes
                 trace.update_trace(
+                    name=f"chat:{chat_id}",
                     user_id=user_email,
                     session_id=chat_id,
                     tags=tags_list if tags_list else None,
@@ -311,34 +312,23 @@ class Pipeline:
         self.chat_traces[chat_id]
 
         assistant_message = get_last_assistant_message(body["messages"])
+        user_message = get_last_user_message(body["messages"])
         assistant_message_obj = get_last_assistant_message_obj(body["messages"])
 
-        usage = None
+        usage_details = None
         if assistant_message_obj:
             info = assistant_message_obj.get("usage", {})
             if isinstance(info, dict):
                 input_tokens = info.get("prompt_eval_count") or info.get("prompt_tokens")
                 output_tokens = info.get("eval_count") or info.get("completion_tokens")
                 if input_tokens is not None and output_tokens is not None:
-                    usage = {
-                        "input": input_tokens,
-                        "output": output_tokens,
+                    usage_details = {
+                        "input": int(input_tokens),
+                        "output": int(output_tokens),
+                        "total": int(input_tokens) + int(output_tokens),
                         "unit": "TOKENS",
                     }
-                    self.log(f"Usage data extracted: {usage}")
-
-        if not usage and "usage" in body:
-            info = body["usage"]
-            if isinstance(info, dict):
-                input_tokens = info.get("prompt_tokens") or info.get("prompt_eval_count")
-                output_tokens = info.get("completion_tokens") or info.get("eval_count")
-                if input_tokens is not None and output_tokens is not None:
-                    usage = {
-                        "input": input_tokens,
-                        "output": output_tokens,
-                        "unit": "TOKENS",
-                    }
-                    self.log(f"Usage data extracted from body: {usage}")
+                    self.log(f"Usage data extracted: {usage_details}")
 
         # Update the trace with complete output information
         trace = self.chat_traces[chat_id]
@@ -357,6 +347,7 @@ class Pipeline:
         
         # Update trace with output and complete metadata
         trace.update_trace(
+            input=user_message,
             output=assistant_message,
             metadata=complete_trace_metadata,
             tags=tags_list if tags_list else None,
@@ -394,19 +385,29 @@ class Pipeline:
             generation = trace.start_generation(
                 name=f"llm_response:{str(uuid.uuid4())}",
                 model=model_value,
-                input=body["messages"],
+                input=user_message,
                 output=assistant_message,
                 metadata=generation_metadata,
             )
 
             # Update with usage if available
-            if usage:
-                generation.update(usage=usage)
+            if usage_details:
+                generation.update(usage_details=usage_details)
 
             generation.end()
             self.log(f"LLM generation completed for chat_id: {chat_id}")
         except Exception as e:
             self.log(f"Failed to create LLM generation: {e}")
+
+        # # End trace after output is provided
+        try:
+            if chat_id in self.chat_traces:
+                # We don't usually put usage on the trace itself, as it aggregates from generations
+                self.chat_traces[chat_id].end()
+                # del self.chat_traces[chat_id]
+                self.log(f"Trace ended for chat_id: {chat_id}")
+        except Exception as e:
+            self.log(f"Failed to end trace: {e}")
 
         # Flush data to Langfuse
         try:
